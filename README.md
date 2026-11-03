@@ -87,6 +87,11 @@ Broom/
   Sunburst/                   Layout math, geometry, transitions, and the chart view
   Views/                      Home, scanning, results, list, top bar, collector, theme
 BroomTests/                   Scanner, layout and navigation tests (Swift Testing)
+LinuxHarness/                 Builds and tests the scanner and models on Linux
 ```
 
 Run the tests with ⌘U in Xcode.
+
+To check the scanner and models without a Mac (for example in CI), `LinuxHarness/run.sh` builds them
+on Linux in Swift 5 and strict Swift 6 modes, runs the tests, and stress-tests the scanner under
+ThreadSanitizer. See [LinuxHarness/README.md](LinuxHarness/README.md).
