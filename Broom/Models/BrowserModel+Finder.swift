@@ -38,13 +38,7 @@ extension BrowserModel {
         }
     }
 
-    static let fullDiskAccessSettingsURL = URL(
-        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
-    )
-
     func openFullDiskAccessSettings() {
-        if let url = Self.fullDiskAccessSettingsURL {
-            NSWorkspace.shared.open(url)
-        }
+        FullDiskAccess.openSettings()
     }
 }

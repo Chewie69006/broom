@@ -101,13 +101,17 @@ enum ScanRingRenderer {
         context.fill(track, with: .color(Color.white.opacity(0.04)))
 
         // Wedges grow as bytes are found. They fill the ring proportionally, so the ring reads as
-        // "where the space is" rather than as a progress bar.
-        let total = snapshot.topFolders.reduce(Int64(0)) { $0 + $1.bytes }
+        // "where the space is" rather than as a progress bar. Biggest first, like the final chart,
+        // so the colors match what comes next.
+        let folders = snapshot.topFolders
+            .filter { $0.bytes > 0 }
+            .sorted { $0.bytes != $1.bytes ? $0.bytes > $1.bytes : $0.id < $1.id }
+        let total = folders.reduce(Int64(0)) { $0 + $1.bytes }
         if total > 0 {
             // Ease the ring open over the first second so it doesn't pop in.
             let reveal = min(time / 1.0, 1)
             var angle = 0.0
-            for folder in snapshot.topFolders where folder.bytes > 0 {
+            for folder in folders {
                 let span = Double(folder.bytes) / Double(total) * fullCircle * reveal
                 if span > 0.004 {
                     let path = SunburstRenderer.sector(center: center, inner: inner, outer: outer, start: angle, end: angle + span)

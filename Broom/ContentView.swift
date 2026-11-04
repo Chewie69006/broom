@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-/// Switches between the disks, the scanning screen and the results.
+/// Switches between onboarding, the disks, the scanning screen and the results.
 struct ContentView: View {
     let model: AppModel
 
@@ -16,6 +16,11 @@ struct ContentView: View {
             Theme.background
 
             switch model.screen {
+            case .launching:
+                Color.clear
+            case .onboarding:
+                OnboardingView(model: model)
+                    .transition(.opacity)
             case .home:
                 HomeView(model: model)
                     .transition(.opacity)

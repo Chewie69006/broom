@@ -7,16 +7,23 @@ import AppKit
 import Foundation
 import Observation
 
-/// Top-level app state: which screen is showing, the mounted volumes, and the scan in progress.
+/// Top-level app state: which screen is showing, the mounted volumes, Full Disk Access, and the
+/// scan in progress.
 @Observable
 final class AppModel {
     enum Screen: Equatable {
+        /// Briefly, while checking Full Disk Access to pick the first screen.
+        case launching
+        case onboarding
         case home
         case scanning
         case results
     }
 
-    private(set) var screen: Screen = .home
+    private(set) var screen: Screen = .launching
+    private(set) var fullDiskAccess: FullDiskAccess.Status = .unknown
+    /// Sandboxed builds only: the startup disk, once the user has given Broom access to it.
+    private(set) var startupDiskAccess: URL? = nil
     private(set) var volumes: [VolumeInfo] = []
     private(set) var hasLoadedVolumes = false
     private(set) var scan: ScanSession? = nil
@@ -26,14 +33,116 @@ final class AppModel {
     @ObservationIgnored private var scanGeneration = 0
     @ObservationIgnored private var progressTask: Task<Void, Never>? = nil
     @ObservationIgnored private var accessedURL: URL? = nil
-    @ObservationIgnored private var volumeObservers: [any NSObjectProtocol] = []
+    @ObservationIgnored private var accessCheckTask: Task<Void, Never>? = nil
+    @ObservationIgnored private var observers: [any NSObjectProtocol] = []
 
     /// Sandboxed builds can only read folders the user picks, so scanning a disk asks first.
+    /// The No Sandbox scheme builds without it (see Configurations/).
     static let isSandboxed = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+
+    private static let onboardingDismissedKey = "FullDiskAccessOnboardingDismissed"
 
     init() {
         observeVolumeChanges()
+        observeAppActivation()
         refreshVolumes()
+        Task { await self.showFirstScreen() }
+    }
+
+    var hasStartupDiskAccess: Bool {
+        startupDiskAccess.map { PathUtilities.path(of: $0) == "/" } ?? false
+    }
+
+    // MARK: - Onboarding and Full Disk Access
+
+    /// Shows onboarding at launch unless Full Disk Access is already on, or the user skipped it.
+    private func showFirstScreen() async {
+        let status = await checkFullDiskAccess()
+        fullDiskAccess = status
+        let wasDismissed = UserDefaults.standard.bool(forKey: Self.onboardingDismissedKey)
+        if status == .granted || wasDismissed {
+            screen = .home
+        } else {
+            showOnboarding()
+        }
+    }
+
+    func showOnboarding() {
+        guard screen != .scanning else { return }
+        screen = .onboarding
+        // Keep checking while onboarding is up, so it updates as soon as access is switched on.
+        accessCheckTask?.cancel()
+        accessCheckTask = Task {
+            while !Task.isCancelled {
+                await self.updateFullDiskAccess()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    func finishOnboarding() {
+        UserDefaults.standard.set(true, forKey: Self.onboardingDismissedKey)
+        stopCheckingAccess()
+        screen = .home
+    }
+
+    private func stopCheckingAccess() {
+        accessCheckTask?.cancel()
+        accessCheckTask = nil
+    }
+
+    func openFullDiskAccessSettings() {
+        FullDiskAccess.openSettings()
+    }
+
+    /// Sandboxed builds: asks for access to the startup disk, so Broom can scan it and check
+    /// Full Disk Access.
+    func requestStartupDiskAccess() {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(filePath: "/")
+        panel.message = "Select your startup disk, then click Allow."
+        configureFolderPanel(panel)
+        panel.prompt = "Allow"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard PathUtilities.path(of: url) == "/" else {
+            errorMessage = "Choose your startup disk (usually “Macintosh HD”), not a folder inside it."
+            return
+        }
+        startupDiskAccess = url
+        refreshFullDiskAccess()
+    }
+
+    func refreshFullDiskAccess() {
+        Task { await self.updateFullDiskAccess() }
+    }
+
+    private func updateFullDiskAccess() async {
+        let status = await checkFullDiskAccess()
+        if fullDiskAccess != status {
+            fullDiskAccess = status
+        }
+    }
+
+    private func checkFullDiskAccess() async -> FullDiskAccess.Status {
+        let status = await FullDiskAccess.check()
+        // Until the user grants the disk, the sandbox itself can refuse the check, so a refusal
+        // doesn't mean Full Disk Access is off.
+        if Self.isSandboxed && !hasStartupDiskAccess && status == .denied {
+            return .unknown
+        }
+        return status
+    }
+
+    private func observeAppActivation() {
+        // Coming back from System Settings: check again.
+        let token = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshFullDiskAccess()
+            }
+        }
+        observers.append(token)
     }
 
     // MARK: - Volumes
@@ -59,7 +168,7 @@ final class AppModel {
                     self?.refreshVolumes()
                 }
             }
-            volumeObservers.append(token)
+            observers.append(token)
         }
     }
 
@@ -70,11 +179,20 @@ final class AppModel {
             scan(ScanTarget(url: volume.url, volume: volume))
             return
         }
+        // Access granted during onboarding (or an earlier scan) lasts until Broom quits.
+        if let granted = startupDiskAccess, PathUtilities.path(of: granted) == PathUtilities.path(of: volume.url) {
+            scan(ScanTarget(url: granted, volume: volume))
+            return
+        }
         let panel = NSOpenPanel()
         panel.directoryURL = volume.url
         panel.message = "Broom needs your permission to read “\(volume.name)”. Click Scan to allow it."
         configureFolderPanel(panel)
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if PathUtilities.path(of: url) == "/" {
+            startupDiskAccess = url
+            refreshFullDiskAccess()
+        }
         scan(ScanTarget(url: url, volume: matchingVolume(for: url)))
     }
 
@@ -118,6 +236,7 @@ final class AppModel {
 
     func scan(_ target: ScanTarget) {
         stopScanning()
+        stopCheckingAccess()
         retire(browser)
         browser = nil
         beginAccess(to: target.url)
@@ -160,11 +279,13 @@ final class AppModel {
 
     func showHome() {
         stopScanning()
+        stopCheckingAccess()
         screen = .home
     }
 
     func showResults() {
         guard browser != nil else { return }
+        stopCheckingAccess()
         screen = .results
     }
 
@@ -196,6 +317,16 @@ final class AppModel {
         Task.detached(priority: .background) {
             try? await Task.sleep(for: .seconds(2))
             withExtendedLifetime(root) {}
+        }
+    }
+}
+
+extension FullDiskAccess {
+    /// Opens Privacy & Security › Full Disk Access in System Settings.
+    @MainActor
+    static func openSettings() {
+        if let url = settingsURL {
+            NSWorkspace.shared.open(url)
         }
     }
 }
