@@ -1,0 +1,12 @@
+//
+//  NoSandbox.xcconfig
+//  Broom
+//
+//  Used by the Debug-NoSandbox and Release-NoSandbox configurations (the "Broom (No Sandbox)" scheme).
+//
+//  App Sandbox off, for distributing outside the Mac App Store (signed and notarized), like
+//  DaisyDisk's download version. Broom can scan whole disks without asking for each one, and can
+//  check Full Disk Access at launch. The hardened runtime stays on, as notarization requires.
+//
+
+ENABLE_APP_SANDBOX = NO

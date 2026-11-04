@@ -35,6 +35,9 @@ struct HomeView: View {
 
             ScrollView {
                 VStack(spacing: 10) {
+                    if model.fullDiskAccess == .denied {
+                        fullDiskAccessCard
+                    }
                     if model.browser != nil {
                         lastScanCard
                     }
@@ -72,6 +75,28 @@ struct HomeView: View {
         } isTargeted: { targeted in
             isDropTargeted = targeted
         }
+    }
+
+    private var fullDiskAccessCard: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 22))
+                .foregroundStyle(Color.orange)
+                .frame(width: 48)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Full Disk Access is off")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.primaryText)
+                Text("Scans will leave out protected folders, like Mail and other apps' data.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.secondaryText)
+            }
+            Spacer()
+            PillButton(title: "Set Up…", isProminent: false) { model.showOnboarding() }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.orange.opacity(0.3)))
     }
 
     private var lastScanCard: some View {

@@ -39,11 +39,16 @@ enum Theme {
 
 /// Colors for chart wedges. Hue follows the wedge's position around the circle, and rings get
 /// lighter and softer further out. Files are muted so folders stand out.
+///
+/// The hue starts at violet at 12 o'clock and runs clockwise through blue, teal, green and yellow
+/// to gold. Items are sorted biggest first, so big items get the cool colors. Red is left out on
+/// purpose: it's kept for deleting, and a big red wedge reads as an error.
 enum SunburstPalette {
     static func color(
         midAngle: Double, depth: Double, isDirectory: Bool, isHighlighted: Bool = false
     ) -> Color {
-        let hue = (midAngle / SunburstLayout.fullCircle * 0.92 + 0.56).truncatingRemainder(dividingBy: 1)
+        var hue = 0.86 - midAngle / SunburstLayout.fullCircle * 0.75
+        hue -= hue.rounded(.down)
         let ring = max(depth, 0)
         var saturation = 0.74 - 0.075 * ring
         var brightness = 0.84 + 0.03 * ring

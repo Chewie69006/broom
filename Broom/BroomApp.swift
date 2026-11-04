@@ -31,6 +31,11 @@ struct BroomCommands: Commands {
     let model: AppModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Full Disk Access…") { model.showOnboarding() }
+                .disabled(model.screen == .scanning || model.screen == .onboarding)
+        }
+
         CommandGroup(replacing: .newItem) {
             Button("Scan Folder…") { model.chooseFolderToScan() }
                 .keyboardShortcut("o")

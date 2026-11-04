@@ -1,0 +1,12 @@
+//
+//  Sandboxed.xcconfig
+//  Broom
+//
+//  Used by the Debug and Release configurations (the "Broom" scheme).
+//
+//  App Sandbox on, as the Mac App Store requires. Broom can read only what the user picks in an
+//  open panel, so it asks for the disk before scanning. Read-write access is needed to delete files.
+//
+
+ENABLE_APP_SANDBOX = YES
+ENABLE_USER_SELECTED_FILES = readwrite

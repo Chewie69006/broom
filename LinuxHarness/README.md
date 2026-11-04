@@ -36,8 +36,8 @@ The script runs three steps and stops at the first failure:
 ## What's covered
 
 Only code that doesn't need SwiftUI or AppKit: everything in `Broom/Scanning`, plus
-`SunburstLayout.swift`, `BrowserModel.swift` and `VolumeInfo.swift`. The views, menus and
-AppKit code still need Xcode.
+`SunburstLayout.swift`, `BrowserModel.swift`, `VolumeInfo.swift` and `FullDiskAccess.swift`. The
+views, menus and AppKit code still need Xcode.
 
 ## How it works
 
