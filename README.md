@@ -17,17 +17,20 @@ as an interactive sunburst, collect what you don't need, and delete it in one go
 1. Open `Broom.xcodeproj` in Xcode.
 2. If you're not on the project's development team, pick your own team under **Signing &
    Capabilities** for the Broom target.
-3. Press ⌘R. On the disks screen, click **Scan** next to a disk. The app is sandboxed, so a panel
-   opens at that disk: click **Scan** again to give Broom access.
+3. Pick a scheme (see [Builds](#builds)) and press ⌘R. Broom opens with a short onboarding that
+   walks you through turning on Full Disk Access, then shows your disks.
 
 ## Features
 
+- **Onboarding at launch** that walks you through Full Disk Access and ticks itself off as soon as
+  it's on.
 - **Disks screen** listing mounted volumes with capacity bars. Scan a volume, choose a folder, or
   drop a folder on the window.
 - **Fast scanning** with `getattrlistbulk` on a pool of worker threads, with a live ring that fills in
   as top-level folders are counted.
-- **Sunburst map**: wedges sized by disk usage, colored by position, up to six levels deep. Items too
-  thin to see are merged into a grey "smaller items" wedge. Zooming in and out is animated.
+- **Sunburst map**: wedges sized by disk usage, colored by position, up to six levels deep. Biggest
+  items get the cool colors, and there's no red, which is kept for deleting. Items too thin to see
+  are merged into a grey "smaller items" wedge. Zooming in and out is animated.
 - **Side list** of the current folder's contents, kept in sync with the map (hover, selection, colors).
 - **Collector**: drag items from the map or list into the tray at the bottom. Then move them all to
   the Trash, or delete them immediately.
@@ -96,17 +99,31 @@ unless marked otherwise.
   the main actor. An old tree is freed by a background task, so dropping millions of nodes doesn't
   stall the UI.
 
-## Sandbox and permissions
+## Builds
 
-The app is sandboxed with read-write access to folders the user picks
-(`ENABLE_USER_SELECTED_FILES = readwrite`), which deletion needs.
+There are two ways to build Broom. Each has its own scheme, configurations and xcconfig file:
 
-- In the sandboxed build, clicking **Scan** on a disk opens a panel at that disk; clicking **Scan**
-  there grants access. Folders chosen or dropped are accessible right away.
-- Some folders (Mail, Messages, Safari data, other apps' containers) are protected by macOS. For a
-  complete scan, turn on Full Disk Access for Broom in **System Settings › Privacy & Security**.
-- If you don't plan to ship on the Mac App Store, you can turn off App Sandbox. Broom then scans disks
-  directly, with no permission panel.
+| Scheme | Configurations | Settings | App Sandbox |
+| --- | --- | --- | --- |
+| Broom | Debug, Release | `Configurations/Sandboxed.xcconfig` | On, as the Mac App Store requires |
+| Broom (No Sandbox) | Debug-NoSandbox, Release-NoSandbox | `Configurations/NoSandbox.xcconfig` | Off, for direct download (signed and notarized), like DaisyDisk's |
+
+The code works in both: it checks at runtime whether it's sandboxed.
+
+```bash
+xcodebuild build -project Broom.xcodeproj -scheme "Broom (No Sandbox)" -destination 'platform=macOS'
+```
+
+## Permissions
+
+- **Full Disk Access.** macOS protects some folders (Mail, Messages, Safari, other apps' data), and
+  apps can't ask for access with a prompt. At launch, Broom shows an onboarding screen that opens
+  **System Settings › Privacy & Security › Full Disk Access** and checks every second until Broom is
+  switched on. You can skip it, and reopen it anytime from **Broom › Full Disk Access…**.
+- **Sandboxed build only.** Broom can read only what you pick in an open panel. Onboarding starts by
+  asking for your startup disk; that access lasts until Broom quits. Scanning another disk asks for
+  that disk. Deleting needs read-write access (`ENABLE_USER_SELECTED_FILES = readwrite`).
+- **No Sandbox build.** Broom scans disks directly, with no panel.
 
 ## Project layout
 
@@ -120,6 +137,7 @@ Broom/
   Views/                      Home, scanning, results, list, top bar, collector, theme
 BroomTests/                   Scanner, layout and navigation tests (Swift Testing)
 BroomUITests/                 UI test template
+Configurations/               Sandboxed and NoSandbox xcconfig files
 LinuxHarness/                 Builds and tests the scanner and models on Linux
 CLAUDE.md                     Notes for working on the code with Claude Code
 ```

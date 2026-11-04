@@ -7,9 +7,10 @@ See README.md for features and architecture.
 ## Commands
 
 ```bash
-# Build and test (macOS, Xcode 27+)
+# Build and test (macOS, Xcode 27+). The "Broom (No Sandbox)" scheme builds without App Sandbox.
 xcodebuild build -project Broom.xcodeproj -scheme Broom -destination 'platform=macOS'
 xcodebuild test -project Broom.xcodeproj -scheme Broom -destination 'platform=macOS'
+xcodebuild build -project Broom.xcodeproj -scheme "Broom (No Sandbox)" -destination 'platform=macOS'
 
 # Linux, no Xcode (needs Swift 6.2+): builds the scanner and models in Swift 5 and strict
 # Swift 6 modes, runs BroomTests, then a ThreadSanitizer stress test.
@@ -17,8 +18,8 @@ LinuxHarness/run.sh
 ```
 
 Run `LinuxHarness/run.sh` after changing anything in `Broom/Scanning/`,
-`Broom/Sunburst/SunburstLayout.swift`, `Broom/Models/BrowserModel.swift` or
-`Broom/Models/VolumeInfo.swift`. The views and AppKit code can only be built in Xcode.
+`Broom/Sunburst/SunburstLayout.swift`, `Broom/Models/BrowserModel.swift`,
+`Broom/Models/VolumeInfo.swift` or `Broom/Models/FullDiskAccess.swift`. The views and AppKit code can only be built in Xcode.
 
 ## Project setup
 
@@ -31,8 +32,20 @@ Run `LinuxHarness/run.sh` after changing anything in `Broom/Scanning/`,
 - `MemberImportVisibility` is on: import every module whose members a file uses (`Foundation`,
   `AppKit`, `CoreGraphics`, `Synchronization`, `UniformTypeIdentifiers`…), even if another import
   seems to bring it in.
-- Sandboxed, with read-write access to user-selected files (deletion needs it). Deployment target
-  macOS 27.2.
+- Deployment target macOS 27.2.
+- Two builds:
+
+  | Scheme | Configurations | xcconfig | App Sandbox |
+  | --- | --- | --- | --- |
+  | `Broom` | Debug, Release | `Configurations/Sandboxed.xcconfig` | on, with read-write user-selected files |
+  | `Broom (No Sandbox)` | Debug-NoSandbox, Release-NoSandbox | `Configurations/NoSandbox.xcconfig` | off |
+
+  - The xcconfig files are attached to the Broom target via `specialized-configurations` in
+    `project.xcproj`.
+  - Keep sandbox settings in the xcconfig files only. Target build settings override them.
+  - A new per-configuration setting (`SETTING[config=Debug]`) needs adding for all four
+    configurations.
+  - Code must work in both builds; branch on `AppModel.isSandboxed` at runtime.
 
 ## Concurrency rules
 
@@ -60,12 +73,15 @@ project, so keep these invariants.
 
 ## Where code goes
 
-- Keep `Broom/Scanning/`, `SunburstLayout.swift`, `BrowserModel.swift` and `VolumeInfo.swift` free
-  of SwiftUI and AppKit, so the Linux harness can build them. AppKit-backed `BrowserModel` actions
+- Keep `Broom/Scanning/`, `SunburstLayout.swift`, `BrowserModel.swift`, `VolumeInfo.swift` and
+  `FullDiskAccess.swift` free of SwiftUI and AppKit, so the Linux harness can build them. AppKit-backed `BrowserModel` actions
   go in `BrowserModel+Finder.swift`; chart drawing goes in `SunburstView.swift`.
 - A new Linux-buildable source file needs a relative symlink in `LinuxHarness/Sources/Broom/`.
 - Colors come from `Theme` and `SunburstPalette`, sizes are formatted with `Int64.byteString`, and
-  icons come from `FileIcons` (cached).
+  icons come from `FileIcons` (cached). The chart palette leaves out red on purpose: red is kept
+  for deleting, and a big red wedge reads as an error.
+- Full Disk Access can't be requested, only detected (`FullDiskAccess.check()` tries to open
+  protected items). Onboarding at launch walks the user through System Settings.
 - Tests use Swift Testing. The test target isn't main-actor by default, so suites that touch app
   types are marked `@MainActor`.
 
