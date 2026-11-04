@@ -1,7 +1,24 @@
+<p align="center">
+  <img src="Broom/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="128" alt="Broom icon">
+</p>
+
 # Broom
 
 A fast disk space analyzer for macOS, in the spirit of DaisyDisk. Scan a disk or folder, explore it
 as an interactive sunburst, collect what you don't need, and delete it in one go.
+
+## Requirements
+
+- macOS 27.2 or later
+- Xcode 27 or later
+
+## Getting started
+
+1. Open `Broom.xcodeproj` in Xcode.
+2. If you're not on the project's development team, pick your own team under **Signing &
+   Capabilities** for the Broom target.
+3. Press ⌘R. On the disks screen, click **Scan** next to a disk. The app is sandboxed, so a panel
+   opens at that disk: click **Scan** again to give Broom access.
 
 ## Features
 
@@ -10,7 +27,7 @@ as an interactive sunburst, collect what you don't need, and delete it in one go
 - **Fast scanning** with `getattrlistbulk` on a pool of worker threads, with a live ring that fills in
   as top-level folders are counted.
 - **Sunburst map**: wedges sized by disk usage, colored by position, up to six levels deep. Items too
-  thin to see are merged into a grey "smaller items" wedge.
+  thin to see are merged into a grey "smaller items" wedge. Zooming in and out is animated.
 - **Side list** of the current folder's contents, kept in sync with the map (hover, selection, colors).
 - **Collector**: drag items from the map or list into the tray at the bottom. Then move them all to
   the Trash, or delete them immediately.
@@ -30,6 +47,21 @@ as an interactive sunburst, collect what you don't need, and delete it in one go
 | Collect for deletion | Drag to the tray | ⌘⌫ |
 | Delete collected items | Delete button | ⌘⇧⌫ |
 | Rescan / scan folder | Toolbar | ⌘R / ⌘O |
+
+## Testing
+
+In Xcode, press ⌘U. From the command line:
+
+```bash
+xcodebuild test -project Broom.xcodeproj -scheme Broom -destination 'platform=macOS'
+```
+
+`BroomTests` covers the scanner (on real temporary folders), the chart layout and geometry,
+navigation, the collector and tree edits.
+
+To check the scanner and models without a Mac (for example in CI), `LinuxHarness/run.sh` builds them
+on Linux in Swift 5 and strict Swift 6 modes, runs the same tests, and stress-tests the scanner under
+ThreadSanitizer. See [LinuxHarness/README.md](LinuxHarness/README.md).
 
 ## How the scanner works
 
@@ -87,11 +119,12 @@ Broom/
   Sunburst/                   Layout math, geometry, transitions, and the chart view
   Views/                      Home, scanning, results, list, top bar, collector, theme
 BroomTests/                   Scanner, layout and navigation tests (Swift Testing)
+BroomUITests/                 UI test template
 LinuxHarness/                 Builds and tests the scanner and models on Linux
+CLAUDE.md                     Notes for working on the code with Claude Code
 ```
 
-Run the tests with ⌘U in Xcode.
+## Working on the code
 
-To check the scanner and models without a Mac (for example in CI), `LinuxHarness/run.sh` builds them
-on Linux in Swift 5 and strict Swift 6 modes, runs the tests, and stress-tests the scanner under
-ThreadSanitizer. See [LinuxHarness/README.md](LinuxHarness/README.md).
+[CLAUDE.md](CLAUDE.md) lists the project's conventions and the rules that keep the scanner
+thread-safe. It's written for Claude Code, but it's a quick read for anyone changing the code.
