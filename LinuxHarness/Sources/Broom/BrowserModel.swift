@@ -1,0 +1,1 @@
+../../../Broom/Models/BrowserModel.swift
