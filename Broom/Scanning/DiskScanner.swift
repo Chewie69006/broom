@@ -29,15 +29,42 @@ nonisolated struct ScanOutcome: Sendable {
 ///   parent (sums sizes, sorts children) and carries on up the tree.
 /// - The tree is complete the moment the last worker goes idle, and it is then handed to the
 ///   caller.
+/// - Like `fts`, folders are opened relative to their parent (`openat`), so the kernel doesn't
+///   re-walk the whole path for every folder. A parent stays open only until its last subfolder
+///   has been opened.
+/// - On APFS and HFS+, each folder's entry count comes back with its parent's listing, so reading
+///   stops without the final empty `getattrlistbulk` call.
 ///
 /// Blocking file-system calls run on these dedicated threads only, never on the main thread and
 /// never on Swift's cooperative thread pool.
 nonisolated final class DiskScanner: @unchecked Sendable {
+    /// Tuning switches, mostly so the benchmark can compare strategies.
+    nonisolated struct Options: Sendable {
+        nonisolated enum EntryCounts: Sendable {
+            /// Use entry counts on APFS and HFS+, whose counts are exact.
+            case automatic
+            case always
+            case never
+        }
+
+        /// Open folders relative to their parent (`openat`) instead of by full path.
+        var opensRelativeToParent = true
+        var entryCounts = EntryCounts.automatic
+        /// Most parent folders kept open at once for relative opens. Beyond that, folders are
+        /// opened by full path.
+        var maximumOpenFolders = 4096
+        /// Worker threads; nil picks a number from the CPU count.
+        var workerCount: Int?
+    }
+
     let rootPath: String
     let progress = ScanProgress()
 
     private let root: FileNode
     private let workerCount: Int
+    private let options: Options
+    private let usesEntryCounts: Bool
+    private let openFolders: OpenFolderBudget
     /// Devices we're willing to descend into. Read-only once `init` returns.
     private let allowedDevices: [dev_t]
     /// Folders to skip even though they live on an allowed device. Read-only once `init` returns.
@@ -57,17 +84,49 @@ nonisolated final class DiskScanner: @unchecked Sendable {
 
     private nonisolated struct WorkItem {
         let node: FileNode
-        let path: String
+        /// The open parent folder to open this one relative to. Nil for the root, or when too many
+        /// folders are open already; the folder is then opened by full path.
+        var parent: DirectoryHandle?
+        /// The parent's device. An entry count is only trusted when the folder turns out to be on
+        /// the same device: a firmlink such as /Users reports the count of the wrong folder.
+        let parentDevice: dev_t
+        /// The folder's entry count from its parent's listing, if the file system gave one.
+        let expectedEntries: Int?
         var topLevel: TopLevelCounter?
         let isRoot: Bool
     }
 
-    init(rootPath: String, rootName: String, workerCount: Int? = nil) {
+    convenience init(rootPath: String, rootName: String, workerCount: Int? = nil) {
+        var options = Options()
+        options.workerCount = workerCount
+        self.init(rootPath: rootPath, rootName: rootName, options: options)
+    }
+
+    init(rootPath: String, rootName: String, options: Options) {
         self.rootPath = rootPath
         self.root = FileNode(name: rootName, kind: .directory, parent: nil)
+        self.options = options
         let cores = ProcessInfo.processInfo.activeProcessorCount
         // Extra threads keep the SSD busy while others wait on I/O.
-        self.workerCount = max(1, workerCount ?? min(max(cores * 2, 4), 24))
+        let workers = max(1, options.workerCount ?? min(max(cores * 2, 4), 24))
+        self.workerCount = workers
+
+        // Relative opens keep parent folders open, so make room for them. The default limit for
+        // apps can be as low as 256 descriptors.
+        let descriptorLimit = Self.raiseDescriptorLimit()
+        let spare = max(descriptorLimit - 64 - workers * 2, 0)
+        self.openFolders = OpenFolderBudget(limit: options.opensRelativeToParent ? min(options.maximumOpenFolders, spare) : 0)
+
+        switch options.entryCounts {
+        case .always:
+            self.usesEntryCounts = true
+        case .never:
+            self.usesEntryCounts = false
+        case .automatic:
+            let values = try? URL(filePath: rootPath).resourceValues(forKeys: [.volumeTypeNameKey])
+            let type = values?.volumeTypeName?.lowercased()
+            self.usesEntryCounts = type == "apfs" || type == "hfs"
+        }
 
         var devices: [dev_t] = []
         var skipped: [InodeKey] = []
@@ -104,7 +163,7 @@ nonisolated final class DiskScanner: @unchecked Sendable {
         hasStarted = true
         onFinish = completion
         startTime = ContinuousClock.now
-        queue.append(WorkItem(node: root, path: rootPath, topLevel: nil, isRoot: true))
+        queue.append(WorkItem(node: root, parent: nil, parentDevice: 0, expectedEntries: nil, topLevel: nil, isRoot: true))
         liveWorkers = workerCount
         condition.unlock()
 
@@ -147,7 +206,7 @@ nonisolated final class DiskScanner: @unchecked Sendable {
             foldersSinceReport += 1
             if foldersSinceReport >= 64 {
                 foldersSinceReport = 0
-                progress.setCurrentPath(item.path)
+                progress.setCurrentPath(path(of: item.node))
             }
 
             // Keep going depth-first with one subfolder and share the rest.
@@ -223,15 +282,18 @@ nonisolated final class DiskScanner: @unchecked Sendable {
         if isCancelled.load(ordering: .relaxed) { return }
         let node = item.node
 
-        let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | (item.isRoot ? 0 : O_NOFOLLOW)
-        let fd = open(item.path, flags)
+        let fd = openFolder(item)
         guard fd >= 0 else {
             node.insertFlags(.unreadable)
             progress.noteUnreadable()
             folderFinished(node, subfolderCount: 0)
             return
         }
-        defer { close(fd) }
+        // Handed to the subfolders instead when they open relative to this folder.
+        var closesDescriptor = true
+        defer {
+            if closesDescriptor { close(fd) }
+        }
 
         var info = stat()
         guard fstat(fd, &info) == 0 else {
@@ -253,8 +315,9 @@ nonisolated final class DiskScanner: @unchecked Sendable {
         var children: [FileNode] = []
         var fileBytes: Int64 = 0
         var fileCount = 0
+        let expectedEntries = item.isRoot || device != item.parentDevice ? nil : item.expectedEntries
 
-        let error = reader.forEachEntry(in: fd) { entry in
+        let error = reader.forEachEntry(in: fd, expectedCount: expectedEntries) { entry in
             if entry.isDirectory {
                 // Other volumes and automount triggers are left out (and never opened).
                 if entry.isMountPoint { return }
@@ -263,7 +326,9 @@ nonisolated final class DiskScanner: @unchecked Sendable {
                 children.append(child)
                 discovered.append(WorkItem(
                     node: child,
-                    path: PathUtilities.join(item.path, name),
+                    parent: nil,
+                    parentDevice: device,
+                    expectedEntries: usesEntryCounts ? entry.entryCount.map { Int($0) } : nil,
                     topLevel: item.topLevel,
                     isRoot: false
                 ))
@@ -294,6 +359,15 @@ nonisolated final class DiskScanner: @unchecked Sendable {
         }
         node.setScannedChildren(children)
 
+        // Keep this folder open so its subfolders can be opened relative to it.
+        if !discovered.isEmpty, openFolders.tryAcquire() {
+            let handle = DirectoryHandle(fd: fd, budget: openFolders)
+            closesDescriptor = false
+            for index in discovered.indices {
+                discovered[index].parent = handle
+            }
+        }
+
         if item.isRoot {
             // Give each top-level folder its own counter so the scanning screen can draw a live ring.
             var counters: [TopLevelCounter] = []
@@ -309,6 +383,54 @@ nonisolated final class DiskScanner: @unchecked Sendable {
         progress.add(files: fileCount, bytes: fileBytes)
         item.topLevel?.add(fileBytes)
         folderFinished(node, subfolderCount: discovered.count)
+    }
+
+    private func openFolder(_ item: WorkItem) -> Int32 {
+        let flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC | (item.isRoot ? 0 : O_NOFOLLOW)
+        if item.isRoot {
+            return open(rootPath, flags)
+        }
+        if let parent = item.parent {
+            let fd = openat(parent.fd, item.node.name, flags)
+            let error = errno
+            // Out of descriptors: fall through and try by path rather than give up on the folder.
+            if fd >= 0 || (error != EMFILE && error != ENFILE) {
+                return fd
+            }
+        }
+        return open(path(of: item.node), flags)
+    }
+
+    /// The full path of a node in the tree being scanned. Node names and parents never change
+    /// during a scan, so any worker can read them.
+    private func path(of node: FileNode) -> String {
+        var names: [String] = []
+        var cursor = node
+        while let parent = cursor.parent {
+            names.append(cursor.name)
+            cursor = parent
+        }
+        var path = rootPath
+        for name in names.reversed() {
+            path = PathUtilities.join(path, name)
+        }
+        return path
+    }
+
+    /// Raises the soft limit on open descriptors as far as allowed (at most 10,240, the macOS
+    /// maximum) and returns the limit in effect.
+    private static func raiseDescriptorLimit() -> Int {
+        var limit = rlimit()
+        guard getrlimit(RLIMIT_NOFILE, &limit) == 0 else { return 256 }
+        let target = min(limit.rlim_max, 10_240)
+        if limit.rlim_cur < target {
+            var raised = limit
+            raised.rlim_cur = target
+            if setrlimit(RLIMIT_NOFILE, &raised) == 0 {
+                return Int(target)
+            }
+        }
+        return Int(min(limit.rlim_cur, 10_240))
     }
 
     /// Records that `node` has been listed. When it has no subfolders left to wait for, it's
@@ -331,6 +453,45 @@ nonisolated final class DiskScanner: @unchecked Sendable {
             if remaining != 0 { return }
             current = parent
         }
+    }
+}
+
+/// An open folder that its subfolders are opened relative to. It's closed when the last
+/// reference goes away, which is once the last of those subfolders has been opened.
+nonisolated final class DirectoryHandle: Sendable {
+    let fd: Int32
+    private let budget: OpenFolderBudget
+
+    init(fd: Int32, budget: OpenFolderBudget) {
+        self.fd = fd
+        self.budget = budget
+    }
+
+    deinit {
+        close(fd)
+        budget.release()
+    }
+}
+
+/// Caps how many folders stay open at once for relative opens.
+nonisolated final class OpenFolderBudget: Sendable {
+    let limit: Int
+    private let inUse = Atomic<Int>(0)
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func tryAcquire() -> Bool {
+        if inUse.wrappingAdd(1, ordering: .relaxed).newValue <= limit {
+            return true
+        }
+        _ = inUse.wrappingSubtract(1, ordering: .relaxed)
+        return false
+    }
+
+    func release() {
+        _ = inUse.wrappingSubtract(1, ordering: .relaxed)
     }
 }
 

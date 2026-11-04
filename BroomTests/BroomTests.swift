@@ -85,6 +85,36 @@ struct ScannerTests {
         #expect(child(root, "empty")?.size == 0)
     }
 
+    @Test func everyOpeningStrategyGivesTheSameTree() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        func summary(_ configure: (inout DiskScanner.Options) -> Void) async -> [String] {
+            var options = DiskScanner.Options()
+            options.workerCount = 4
+            configure(&options)
+            let outcome = await DiskScanner(rootPath: PathUtilities.path(of: fixture), rootName: "fixture", options: options).run()
+            var lines: [String] = []
+            func visit(_ node: FileNode, _ path: String) {
+                lines.append("\(path) \(node.size) \(node.descendantCount)")
+                for child in node.children {
+                    visit(child, path + "/" + child.name)
+                }
+            }
+            visit(outcome.root, "")
+            return lines.sorted()
+        }
+
+        let relative = await summary { $0.entryCounts = .always }
+        let fullPaths = await summary {
+            $0.opensRelativeToParent = false
+            $0.entryCounts = .never
+        }
+        let fewOpenFolders = await summary { $0.maximumOpenFolders = 1 }
+        #expect(relative == fullPaths)
+        #expect(fewOpenFolders == fullPaths)
+    }
+
     @Test func cancelledScanReportsCancellation() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture) }
