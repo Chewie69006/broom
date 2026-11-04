@@ -3,10 +3,18 @@
 // macOS kernel uses: length, returned attribute_set_t, [error], name ref, [devid], [objtype],
 // [fileid], dir attrs, file attrs, then the name bytes. 64-bit fields deliberately land on
 // non-8-byte-aligned offsets, and batches are small so the reader loops over many calls.
-// Names starting with "zz_error_" come back as ATTR_CMN_ERROR entries.
+// Names starting with "zz_error_" come back as ATTR_CMN_ERROR entries. Folders report their entry
+// count (ATTR_DIR_ENTRYCOUNT) when asked.
+//
+// Also provides fts (through CFTS) and the Darwin spelling of RLIMIT_NOFILE.
 
+@_exported import CFTS
 @_exported import Glibc
 import Synchronization
+
+/// Darwin declares this as an Int32; Glibc as an enum case. Shadows Glibc's for code that
+/// imports Darwin (that is, this shim).
+public let RLIMIT_NOFILE = Int32(Glibc.RLIMIT_NOFILE.rawValue)
 
 public struct attrlist {
     public var bitmapcount: UInt16 = 0
@@ -25,6 +33,7 @@ private let cmnObjType: UInt32 = 0x8
 private let cmnFileID: UInt32 = 0x0200_0000
 private let cmnError: UInt32 = 0x2000_0000
 private let cmnReturned: UInt32 = 0x8000_0000
+private let dirEntryCount: UInt32 = 0x2
 private let dirMountStatus: UInt32 = 0x4
 private let fileLinkCount: UInt32 = 0x1
 private let fileAllocSize: UInt32 = 0x4
@@ -66,6 +75,13 @@ public func getattrlistbulk(
         return -1
     }
 
+    // The kernel ties a listing to the open file. Here it's keyed by descriptor number, so a folder
+    // that was opened afresh (offset still 0) must not pick up a listing left by an earlier folder
+    // that had the same number. The reader can stop before the end now, so leftovers happen.
+    if lseek(dirfd, 0, SEEK_CUR) == 0 {
+        listings.withLock { $0[dirfd] = nil }
+    }
+
     var listing: Listing
     if let existing = listings.withLock({ $0[dirfd] }) {
         listing = existing
@@ -105,9 +121,7 @@ private func readAll(_ dirfd: Int32, _ request: attrlist) -> [[UInt8]]? {
 
     var result: [[UInt8]] = []
     while let entry = readdir(dir) {
-        let name = withUnsafePointer(to: entry.pointee.d_name) { pointer in
-            pointer.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
-        }
+        let name = direntName(entry)
         if name == "." || name == ".." { continue }
         var info = stat()
         if name.hasPrefix("zz_error_") || fstatat(dirfd, name, &info, AT_SYMLINK_NOFOLLOW) != 0 {
@@ -115,7 +129,9 @@ private func readAll(_ dirfd: Int32, _ request: attrlist) -> [[UInt8]]? {
             result.append(packError(name: name, request: request))
             continue
         }
-        result.append(pack(name: name, info: info, parentDevice: dirInfo.st_dev, request: request))
+        let isDirectory = info.st_mode & 0o170000 == 0o040000
+        let entryCount = isDirectory && request.dirattr & dirEntryCount != 0 ? countEntries(dirfd, name) : nil
+        result.append(pack(name: name, info: info, parentDevice: dirInfo.st_dev, entryCount: entryCount, request: request))
     }
     return result
 }
@@ -158,7 +174,30 @@ private func finish(_ writer: inout Writer, nameRefOffset: Int, name: String) ->
     return writer.bytes
 }
 
-private func pack(name: String, info: stat, parentDevice: dev_t, request: attrlist) -> [UInt8] {
+/// The name in a `dirent` from readdir. Records are only as long as their name needs, so this reads
+/// in place up to the NUL. Copying the whole 256-byte `d_name` can run past the end of the buffer.
+public func direntName(_ entry: UnsafeMutablePointer<dirent>) -> String {
+    let offset = MemoryLayout<dirent>.offset(of: \dirent.d_name)!
+    return String(cString: (UnsafeRawPointer(entry) + offset).assumingMemoryBound(to: CChar.self))
+}
+
+private func countEntries(_ dirfd: Int32, _ name: String) -> UInt32? {
+    let fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { return nil }
+    guard let dir = fdopendir(fd) else {
+        close(fd)
+        return nil
+    }
+    defer { closedir(dir) }
+    var count: UInt32 = 0
+    while let entry = readdir(dir) {
+        let child = direntName(entry)
+        if child != "." && child != ".." { count += 1 }
+    }
+    return count
+}
+
+private func pack(name: String, info: stat, parentDevice: dev_t, entryCount: UInt32?, request: attrlist) -> [UInt8] {
     let type = objectType(info.st_mode)
     let isDirectory = type == 2
     var common = cmnReturned
@@ -170,6 +209,7 @@ private func pack(name: String, info: stat, parentDevice: dev_t, request: attrli
     if request.commonattr & cmnFileID != 0 { common |= cmnFileID }
     if isDirectory {
         dirBits = request.dirattr & dirMountStatus
+        if entryCount != nil { dirBits |= request.dirattr & dirEntryCount }
     } else {
         fileBits = request.fileattr & (fileLinkCount | fileAllocSize)
     }
@@ -186,6 +226,7 @@ private func pack(name: String, info: stat, parentDevice: dev_t, request: attrli
     if common & cmnDevID != 0 { writer.u32(UInt32(truncatingIfNeeded: info.st_dev)) }
     if common & cmnObjType != 0 { writer.u32(type) }
     if common & cmnFileID != 0 { writer.u64(UInt64(info.st_ino)) }
+    if dirBits & dirEntryCount != 0 { writer.u32(entryCount ?? 0) }
     if dirBits & dirMountStatus != 0 { writer.u32(info.st_dev != parentDevice ? 1 : 0) }
     if fileBits & fileLinkCount != 0 { writer.u32(UInt32(info.st_nlink)) }
     if fileBits & fileAllocSize != 0 { writer.i64(Int64(info.st_blocks) * 512) }

@@ -18,14 +18,17 @@ Or, with Swift installed, from this folder:
 ./run.sh
 ```
 
-The script runs three steps and stops at the first failure:
+The script runs four steps and stops at the first failure:
 
 1. **Build and test in Swift 5 mode**, with the Xcode project's settings: `MainActor` default
    isolation, approachable concurrency and member import visibility. Runs `BroomTests`.
 2. **Build and test in strict Swift 6 mode**, where any concurrency problem is an error.
-3. **Stress test under ThreadSanitizer** (`Stress/main.swift`):
+3. **Benchmark cross-check**: runs `Benchmark/main.swift` (built as `Bench`) once and fails if
+   any scanner setup's totals differ from `fts`'s. The timings mean little on Linux.
+4. **Stress test under ThreadSanitizer** (`Stress/main.swift`):
    - Scans a folder (default `/usr/lib`, or pass one: `./run.sh /some/folder`) with 1, 4 and 24
-     workers, then `/usr` with 8.
+     workers, with full-path opens and no entry counts, and with at most 3 open folders. Then
+     `/usr` with 8 workers.
    - Compares every scan against a simple single-threaded walk, and checks every folder's size,
      sort order, parent links and item count.
    - Polls progress from another thread during scans, the way the UI does.
@@ -50,6 +53,13 @@ views, menus and AppKit code still need Xcode.
   per call. Names starting with `zz_error_` come back as error entries. The app's `import Darwin`
   is pointed at the shim with `-module-alias Darwin=DarwinShim`.
 - `Shims/CoreGraphics` re-exports Foundation, which provides the CG types on Linux.
+- `Shims/CFTS` exposes `<fts.h>`, which Glibc's Swift module leaves out. The shim re-exports it,
+  and provides Darwin's `RLIMIT_NOFILE` (an `Int32`; Glibc has an enum case). It also reports
+  `ATTR_DIR_ENTRYCOUNT`, and starts a fresh listing for any descriptor still at offset 0. The
+  kernel ties a listing to the open file, but the shim keys it by descriptor number, which gets
+  reused.
+- `Bench/` links the benchmark and the scanner sources into one module, as `Benchmark/run.sh`
+  does on macOS.
 - `Sources/Broom/_LinuxOnlyShims.swift` stubs two macOS-only Foundation APIs that Linux lacks
   (`FileManager.trashItem` and a disk-capacity key).
 - `Sources/Broom/_TSanMutex.swift` is used only for the ThreadSanitizer build. On Linux, Swift's
