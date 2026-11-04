@@ -25,14 +25,19 @@ nonisolated final class BulkDirectoryReader {
 
     /// Calls `body` for every entry of the open directory `fd`.
     /// Returns 0 when the whole folder was read, or the `errno` that stopped it.
-    func forEachEntry(in fd: Int32, _ body: (DirectoryEntry) -> Void) -> Int32 {
+    ///
+    /// `expectedCount` is the folder's entry count, if known. Reading stops once that many entries
+    /// have come back, which saves the final call that would only report the end of the folder.
+    func forEachEntry(in fd: Int32, expectedCount: Int? = nil, _ body: (DirectoryEntry) -> Void) -> Int32 {
         var request = attrlist()
         request.bitmapcount = AttributeBits.bitmapCount
         request.commonattr = AttributeBits.common
         request.dirattr = AttributeBits.directory
         request.fileattr = AttributeBits.file
 
+        var entriesRead = 0
         while true {
+            if let expectedCount, entriesRead >= expectedCount { return 0 }
             let count = getattrlistbulk(fd, &request, buffer, Self.bufferSize, 0)
             if count == 0 { return 0 }
             if count < 0 {
@@ -49,6 +54,7 @@ nonisolated final class BulkDirectoryReader {
                 }
                 cursor += length
             }
+            entriesRead += Int(count)
         }
     }
 }
@@ -59,6 +65,8 @@ nonisolated struct DirectoryEntry {
     var name: UnsafeRawBufferPointer
     var objectType: UInt32
     var fileID: UInt64
+    /// For folders: how many entries they hold, if the file system reports it.
+    var entryCount: UInt32?
     var mountStatus: UInt32
     var linkCount: UInt32
     var allocatedSize: Int64
@@ -105,6 +113,12 @@ nonisolated struct DirectoryEntry {
             cursor += 8
         }
 
+        entryCount = nil
+        if returnedDirectory & AttributeBits.directoryEntryCount != 0 {
+            entryCount = cursor.loadUnaligned(as: UInt32.self)
+            cursor += 4
+        }
+
         mountStatus = 0
         if returnedDirectory & AttributeBits.directoryMountStatus != 0 {
             mountStatus = cursor.loadUnaligned(as: UInt32.self)
@@ -135,6 +149,7 @@ nonisolated enum AttributeBits {
     static let commonError: UInt32 = 0x2000_0000  // ATTR_CMN_ERROR
     static let commonReturnedAttributes: UInt32 = 0x8000_0000  // ATTR_CMN_RETURNED_ATTRS
 
+    static let directoryEntryCount: UInt32 = 0x0000_0002  // ATTR_DIR_ENTRYCOUNT
     static let directoryMountStatus: UInt32 = 0x0000_0004  // ATTR_DIR_MOUNTSTATUS
     static let mountPoint: UInt32 = 0x0000_0001  // DIR_MNTSTATUS_MNTPOINT
     static let mountTrigger: UInt32 = 0x0000_0002  // DIR_MNTSTATUS_TRIGGER
@@ -143,7 +158,7 @@ nonisolated enum AttributeBits {
     static let fileAllocatedSize: UInt32 = 0x0000_0004  // ATTR_FILE_ALLOCSIZE
 
     static let common = commonReturnedAttributes | commonName | commonError | commonObjectType | commonFileID
-    static let directory = directoryMountStatus
+    static let directory = directoryEntryCount | directoryMountStatus
     static let file = fileLinkCount | fileAllocatedSize
 }
 

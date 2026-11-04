@@ -12,8 +12,11 @@ xcodebuild build -project Broom.xcodeproj -scheme Broom -destination 'platform=m
 xcodebuild test -project Broom.xcodeproj -scheme Broom -destination 'platform=macOS'
 xcodebuild build -project Broom.xcodeproj -scheme "Broom (No Sandbox)" -destination 'platform=macOS'
 
+# Scanner benchmark against fts (macOS, Terminal). Also flags any setup whose totals differ.
+Benchmark/run.sh [--runs N] [folder ...]
+
 # Linux, no Xcode (needs Swift 6.2+): builds the scanner and models in Swift 5 and strict
-# Swift 6 modes, runs BroomTests, then a ThreadSanitizer stress test.
+# Swift 6 modes, runs BroomTests, checks the benchmark's totals, then a ThreadSanitizer stress test.
 LinuxHarness/run.sh
 ```
 
@@ -89,7 +92,7 @@ project, so keep these invariants.
 
 - `BulkDirectoryReader.swift` parses `getattrlistbulk` buffers:
   - Attributes are packed in bit order (common, then directory, then file), and only if they're set
-    in the returned bitmap.
+    in the returned bitmap. Directory attributes come as entry count, then mount status.
   - `ATTR_CMN_ERROR` comes right after the returned bitmap.
   - 64-bit fields can be unaligned, so read them with `loadUnaligned`.
 
@@ -98,6 +101,15 @@ project, so keep these invariants.
 - Sizes are allocated bytes (`ATTR_FILE_ALLOCSIZE`). Hard links are counted once. Mount points and
   automount triggers are never opened. When scanning `/`, the Data volume is allowed but
   `/System/Volumes/Data` is skipped to avoid double counting.
+- Folders are opened with `openat` relative to a `DirectoryHandle` for their parent. The handle
+  closes its descriptor when the last subfolder holding it is done. `OpenFolderBudget` caps open
+  handles; past the cap, or on `EMFILE`, folders are opened by full path. The scanner raises the
+  descriptor limit at start.
+- Entry counts end a folder's reading early. They're trusted only on APFS and HFS+
+  (`Options.EntryCounts.automatic`), and only when the folder is on the same device as its
+  parent: a firmlink like `/Users` reports the count of the wrong folder. An understated count
+  would silently drop entries, so don't widen this without checking.
+- `DiskScanner.Options` exists for the benchmark and tests; the app uses the defaults.
 
 ## Linux harness notes
 
@@ -107,3 +119,5 @@ project, so keep these invariants.
 - On Linux, ThreadSanitizer reports false races inside `Synchronization.Mutex`, which uses raw
   futexes. The stress build swaps in `_TSanMutex.swift` for that reason. Any other TSan report is
   a real bug.
+- Read `dirent` names with the shim's `direntName`, never by copying `d_name`: records are only as
+  long as their name, and copying all 256 bytes can run off the end of the buffer and crash.

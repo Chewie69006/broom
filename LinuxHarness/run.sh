@@ -38,6 +38,16 @@ BROOM_STRICT=1 swift build --build-tests --scratch-path .build-strict 2>&1 | qui
 run_tests env BROOM_STRICT=1 swift test --skip-build --scratch-path .build-strict
 
 echo
+echo "==> Benchmark, as a check that every scanner setup matches fts"
+# Timings mean little here (the shim stands in for getattrlistbulk); the totals must agree.
+bench_output=$(.build/debug/Bench --runs 1 "${1:-/usr/lib}")
+echo "$bench_output" | grep -vE '^(for cold|[0-9]+ cores)'
+if grep -q "totals differ" <<<"$bench_output"; then
+    echo "Some scanner setup disagrees with fts." >&2
+    exit 1
+fi
+
+echo
 echo "==> Stress test under ThreadSanitizer"
 # BROOM_TSAN_MUTEX swaps in a pthread-based Mutex that TSan can see (see Sources/Broom/_TSanMutex.swift).
 swift build --product Stress --sanitize=thread --scratch-path .build-tsan -Xswiftc -DBROOM_TSAN_MUTEX 2>&1 | quiet

@@ -14,3 +14,12 @@ nonisolated extension URLResourceKey {
 nonisolated extension URLResourceValues {
     var volumeAvailableCapacityForImportantUsage: Int64? { nil }
 }
+
+nonisolated extension URLResourceKey {
+    static let volumeTypeNameKey = URLResourceKey(rawValue: "NSURLVolumeTypeNameKey")
+}
+
+nonisolated extension URLResourceValues {
+    /// Unknown on Linux, so the scanner's automatic mode leaves entry counts off.
+    var volumeTypeName: String? { nil }
+}

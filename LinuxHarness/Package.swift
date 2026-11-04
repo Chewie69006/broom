@@ -28,13 +28,22 @@ if !strict {
 let package = Package(
     name: "BroomHarness",
     targets: [
-        .target(name: "DarwinShim", path: "Shims/DarwinShim"),
+        .target(name: "CFTS", path: "Shims/CFTS"),
+        .target(name: "DarwinShim", dependencies: ["CFTS"], path: "Shims/DarwinShim"),
         .target(name: "CoreGraphics", path: "Shims/CoreGraphics"),
         .target(
             name: "Broom",
             dependencies: ["DarwinShim", "CoreGraphics"],
             path: "Sources/Broom",
             // `import Darwin` in the app's sources resolves to the shim.
+            swiftSettings: [.defaultIsolation(MainActor.self)] + approachable
+                + [.unsafeFlags(["-module-alias", "Darwin=DarwinShim"])]
+        ),
+        // Benchmark/main.swift built with the scanner sources, as Benchmark/run.sh does on macOS.
+        .executableTarget(
+            name: "Bench",
+            dependencies: ["DarwinShim"],
+            path: "Bench",
             swiftSettings: [.defaultIsolation(MainActor.self)] + approachable
                 + [.unsafeFlags(["-module-alias", "Darwin=DarwinShim"])]
         ),

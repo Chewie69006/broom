@@ -80,9 +80,31 @@ ThreadSanitizer. See [LinuxHarness/README.md](LinuxHarness/README.md).
   an atomic with acquire/release ordering. The worker that finishes the last one sums and sorts the
   parent, then carries on upward. The tree is ready the moment the last worker goes idle, with no
   second pass.
+- **Folders open relative to their parent**, as `fts` does (`openat`), so the kernel doesn't re-walk
+  the whole path for each folder. A parent stays open only until its last subfolder has been opened,
+  with a cap on how many are open at once.
+- **No wasted end-of-folder call.** A folder's listing also reports each subfolder's entry count.
+  On APFS and HFS+, where counts are exact, Broom stops reading a folder once it has them all,
+  without the extra call that would just say "no more entries". Empty folders aren't read at all.
 - **Correct disk usage:** sizes are allocated bytes, and hard-linked files are counted once. Other
   volumes, mount points and automount triggers are skipped. Scanning `/` follows the firmlinks into
   the Data volume but skips `/System/Volumes/Data`, so nothing is counted twice.
+
+### Benchmark
+
+On macOS, `fts` lists folders with `getattrlistbulk` too, one folder at a time. `Benchmark/run.sh` times
+it against Broom's scanner on the same folders: with 1 thread, one per core, the default, and
+with each of the two optimizations above turned off.
+
+```bash
+Benchmark/run.sh ~ /Applications
+Benchmark/run.sh --runs 1 ~        # after `sudo purge`, for cold-cache numbers
+```
+
+Each row also reports whether its totals differ from `fts`'s, so it doubles as a correctness check.
+Pick folders rather than `/`: with `FTS_XDEV`, `fts` won't follow `/Users` and the other firmlinks
+into the Data volume, so it would count much less than Broom. Give Terminal Full Disk Access to
+include protected folders.
 
 ### Threading rules
 
@@ -138,6 +160,7 @@ Broom/
 BroomTests/                   Scanner, layout and navigation tests (Swift Testing)
 BroomUITests/                 UI test template
 Configurations/               Sandboxed and NoSandbox xcconfig files
+Benchmark/                    Times the scanner against fts (macOS, from Terminal)
 LinuxHarness/                 Builds and tests the scanner and models on Linux
 CLAUDE.md                     Notes for working on the code with Claude Code
 ```

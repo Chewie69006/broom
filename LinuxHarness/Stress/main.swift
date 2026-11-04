@@ -30,9 +30,7 @@ nonisolated func referenceTotals(_ path: String) -> (bytes: Int64, count: Int) {
         guard let dir = opendir(dirPath) else { return }
         defer { closedir(dir) }
         while let entry = readdir(dir) {
-            let name = withUnsafePointer(to: entry.pointee.d_name) {
-                $0.withMemoryRebound(to: CChar.self, capacity: 256) { String(cString: $0) }
-            }
+            let name = direntName(entry)
             if name == "." || name == ".." { continue }
             let child = dirPath == "/" ? "/" + name : dirPath + "/" + name
             var info = stat()
@@ -72,9 +70,14 @@ func verifyTree(_ node: FileNode) -> Int {
     return count
 }
 
-func scanAndCheck(_ path: String, workers: Int) async {
+func scanAndCheck(_ path: String, workers: Int, strategy: String = "default", _ configure: (inout DiskScanner.Options) -> Void = { _ in }) async {
     let reference = referenceTotals(path)
-    let scanner = DiskScanner(rootPath: path, rootName: "root", workerCount: workers)
+    var options = DiskScanner.Options()
+    options.workerCount = workers
+    // The shim reports exact counts, so use them here (on macOS they're only trusted on APFS/HFS+).
+    options.entryCounts = .always
+    configure(&options)
+    let scanner = DiskScanner(rootPath: path, rootName: "root", options: options)
 
     // Poll progress from another thread while the workers run, like the UI does.
     let polling = Flag()
@@ -100,7 +103,7 @@ func scanAndCheck(_ path: String, workers: Int) async {
     if outcome.root.size != reference.bytes || count != reference.count {
         fail("\(path) [\(workers) workers]: scanner \(outcome.root.size) B / \(count) items, reference \(reference.bytes) B / \(reference.count) items")
     }
-    print("ok  \(path)  workers=\(workers)  items=\(count)  bytes=\(outcome.root.size)  \(elapsed)")
+    print("ok  \(path)  workers=\(workers)  \(strategy)  items=\(count)  bytes=\(outcome.root.size)  \(elapsed)")
 }
 
 func cancellationStress(_ path: String, rounds: Int) async {
@@ -174,6 +177,12 @@ let folder = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/usr/
 for workers in [1, 4, 24] {
     await scanAndCheck(folder, workers: workers)
 }
+// Every way of opening folders must give the same totals.
+await scanAndCheck(folder, workers: 8, strategy: "full paths, no counts") {
+    $0.opensRelativeToParent = false
+    $0.entryCounts = .never
+}
+await scanAndCheck(folder, workers: 8, strategy: "3 open folders max") { $0.maximumOpenFolders = 3 }
 await scanAndCheck("/usr", workers: 8)
 await cancellationStress(folder, rounds: 60)
 await deletionFlow()
